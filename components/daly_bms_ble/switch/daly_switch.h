@@ -1,24 +1,51 @@
 #pragma once
 
-#include "../daly_bms_ble.h"
 #include "esphome/core/component.h"
 #include "esphome/components/switch/switch.h"
+#include "../daly_bms_ble.h"
 
-namespace esphome::daly_bms_ble {
+namespace esphome {
+namespace daly_bms_ble {
 
-class DalyBmsBle;
-class DalySwitch : public switch_::Switch, public Component {
+// ============================================================
+// PATCH: Non-optimistic switches cho charging & discharging
+//
+// Vấn đề gốc (syssi):
+//   write_state() gửi lệnh BLE + gọi publish_state(state) ngay lập tức.
+//   → Switch hiển thị lệnh đã gửi, KHÔNG phản chiếu trạng thái thực tế.
+//   → Nếu BMS từ chối (bảo vệ quá áp/nhiệt/...) switch vẫn hiện ON.
+//
+// Giải pháp (học từ patagonaa):
+//   1. write_state() chỉ gửi lệnh, KHÔNG publish_state().
+//   2. DalyBmsBle::parse_charging_status() gọi publish_state(actual_bit)
+//      sau mỗi lần nhận dữ liệu từ BMS → switch luôn = thực tế hardware.
+// ============================================================
+
+class DalyBmsBleChargingSwitch : public switch_::Switch, public Parented<DalyBmsBle> {
  public:
-  void set_parent(DalyBmsBle *parent) { this->parent_ = parent; };
-  void set_holding_register(uint16_t holding_register) { this->holding_register_ = holding_register; };
-  void dump_config() override;
-  void loop() override {}
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  // Không optimistic: state chỉ thay đổi khi BMS trả về dữ liệu thực
+  bool is_optimistic() override { return false; }
 
  protected:
-  void write_state(bool state) override;
-  DalyBmsBle *parent_;
-  uint16_t holding_register_;
+  void write_state(bool state) override {
+    // Chỉ gửi lệnh, KHÔNG gọi publish_state() ở đây.
+    // Trạng thái sẽ được cập nhật bởi vòng polling khi BMS xác nhận.
+    this->parent_->set_charging(state);
+    // Tùy chọn: log để debug
+    ESP_LOGD("daly_bms_ble.switch", "Charging switch command sent: %s (awaiting BMS confirmation)", state ? "ON" : "OFF");
+  }
 };
 
-}  // namespace esphome::daly_bms_ble
+class DalyBmsBledischargingSwitch : public switch_::Switch, public Parented<DalyBmsBle> {
+ public:
+  bool is_optimistic() override { return false; }
+
+ protected:
+  void write_state(bool state) override {
+    this->parent_->set_discharging(state);
+    ESP_LOGD("daly_bms_ble.switch", "Discharging switch command sent: %s (awaiting BMS confirmation)", state ? "ON" : "OFF");
+  }
+};
+
+}  // namespace daly_bms_ble
+}  // namespace esphome
