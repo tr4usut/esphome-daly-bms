@@ -1,48 +1,75 @@
-import esphome.codegen as cg
-from esphome.components import switch
-import esphome.config_validation as cv
+"""
+PATCH: components/daly_bms_ble/switch/__init__.py
 
-from .. import CONF_DALY_BMS_BLE_ID, DALY_BMS_BLE_COMPONENT_SCHEMA, daly_bms_ble_ns
-from ..const import CONF_CHARGING, CONF_DISCHARGING, ICON_CHARGING, ICON_DISCHARGING
+Thay đổi chính:
+- Thêm restore_mode mặc định DISABLED (không restore từ flash,
+  vì state phải đến từ BMS, không phải từ bộ nhớ ESP)
+- Đảm bảo switch được đăng ký với parent component để parent
+  có thể gọi publish_state() khi có dữ liệu từ BMS.
+
+Dựa trên pattern của patagonaa/esphome-daly-hkms-bms.
+"""
+
+import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome.components import switch
+from esphome.const import (
+    CONF_ID,
+    ENTITY_CATEGORY_CONFIG,
+    ICON_POWER,
+)
+from .. import daly_bms_ble_ns, DalyBmsBle, CONF_DALY_BMS_BLE_ID
 
 DEPENDENCIES = ["daly_bms_ble"]
 
-CODEOWNERS = ["@syssi"]
+DalyBmsBleChargingSwitch = daly_bms_ble_ns.class_(
+    "DalyBmsBleChargingSwitch", switch.Switch
+)
+DalyBmsBledischargingSwitch = daly_bms_ble_ns.class_(
+    "DalyBmsBledischargingSwitch", switch.Switch
+)
 
-CONF_BALANCER = "balancer"
+CONF_CHARGING = "charging"
+CONF_DISCHARGING = "discharging"
 
-ICON_BALANCER = "mdi:seesaw"
-
-SWITCHES = {
-    CONF_BALANCER: 0x00CF,
-    CONF_CHARGING: 0x00A5,
-    CONF_DISCHARGING: 0x00A6,
-}
-
-DalySwitch = daly_bms_ble_ns.class_("DalySwitch", switch.Switch, cg.Component)
-
-CONFIG_SCHEMA = DALY_BMS_BLE_COMPONENT_SCHEMA.extend(
+# ============================================================
+# QUAN TRỌNG: restore_mode = DISABLED
+#
+# Không dùng RESTORE_DEFAULT_OFF hay RESTORE_DEFAULT_ON.
+# Switch state phải đến từ BMS (qua polling), không phải
+# từ flash storage của ESP. Nếu restore từ flash, switch sẽ
+# hiển thị sai ngay lúc khởi động trước khi nhận data từ BMS.
+# ============================================================
+CONFIG_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_BALANCER): switch.switch_schema(
-            DalySwitch, icon=ICON_BALANCER
-        ),
+        cv.GenerateID(CONF_DALY_BMS_BLE_ID): cv.use_id(DalyBmsBle),
         cv.Optional(CONF_CHARGING): switch.switch_schema(
-            DalySwitch, icon=ICON_CHARGING
+            DalyBmsBleChargingSwitch,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            icon=ICON_POWER,
+            # Không restore: state đến từ BMS polling
+            default_restore_mode=switch.SwitchRestoreMode.DISABLED,
         ),
         cv.Optional(CONF_DISCHARGING): switch.switch_schema(
-            DalySwitch, icon=ICON_DISCHARGING
+            DalyBmsBleischargingSwitch,
+            entity_category=ENTITY_CATEGORY_CONFIG,
+            icon=ICON_POWER,
+            default_restore_mode=switch.SwitchRestoreMode.DISABLED,
         ),
     }
 )
 
 
 async def to_code(config):
-    hub = await cg.get_variable(config[CONF_DALY_BMS_BLE_ID])
-    for key, address in SWITCHES.items():
-        if key in config:
-            conf = config[key]
-            var = await switch.new_switch(conf)
-            await cg.register_component(var, conf)
-            cg.add(getattr(hub, f"set_{key}_switch")(var))
-            cg.add(var.set_parent(hub))
-            cg.add(var.set_holding_register(address))
+    parent = await cg.get_variable(config[CONF_DALY_BMS_BLE_ID])
+
+    if charging_config := config.get(CONF_CHARGING):
+        sw = await switch.new_switch(charging_config)
+        await cg.register_parented(sw, parent)
+        # Đăng ký pointer trong parent để parent có thể publish_state()
+        cg.add(parent.set_charging_switch(sw))
+
+    if discharging_config := config.get(CONF_DISCHARGING):
+        sw = await switch.new_switch(discharging_config)
+        await cg.register_parented(sw, parent)
+        cg.add(parent.set_discharging_switch(sw))
